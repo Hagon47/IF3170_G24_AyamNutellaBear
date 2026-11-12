@@ -5,6 +5,8 @@ class Svm:
     def __init__(self, kernel='linear', gamma=0.5, C=1.0, n_iters=1000, learning_rate=1e-3, tolerance=1e-6):
         self.kernel = kernel
         self.gamma = gamma
+        self.learning_rate = learning_rate
+        self.tolerance = tolerance
         self.C = C
         self.n_iters = n_iters
 
@@ -96,7 +98,7 @@ class Svm:
         
         decision = K @ (self.alpha * self.y_train) + self.b 
         
-        return decision
+        return np.where(decision <= 0, -1, 1)
         
     # Function to compute based on the selected kernel type
     def _compute_kernel(self, X1, X2):
