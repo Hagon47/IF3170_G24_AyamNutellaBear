@@ -59,8 +59,11 @@ class NaiveBayes:
         
         return prob / prob.sum(axis=1, keepdims=True)
 
-    def predict(self, X):
-        return self.class_labels_[np.argmax(self._class_log_score(X), axis=1)]
+    def predict(self, X, threshold=None):
+        if threshold is None:
+            return self.class_labels_[np.argmax(self._class_log_score(X), axis=1)]
+        proba = self.predict_proba(X)[:, 1]
+        return self.class_labels_[(proba >= threshold).astype(int)]
 
     def save(self, path):
         np.savez(
