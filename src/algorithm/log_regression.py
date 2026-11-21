@@ -70,7 +70,7 @@ class LogisticRegression:
         log_loss = np.mean(np.logaddexp(0, (1 - 2 * y) * z))
         return float(log_loss + self.regularization_loss())
     
-    def fit(self, X, y):
+    def fit(self, X, y, history_loss=None):
         X = np.asarray(X, dtype=float)
         y = np.asarray(y, dtype=float)
 
@@ -87,6 +87,11 @@ class LogisticRegression:
         self.b = np.zeros(X_bias.shape[1])
         self.n_iteration = 0
         self.loss_history = [self.loss(X_bias @ self.b, y)]
+        
+        if history_loss is not None:
+            history_loss.clear()
+            history_loss.append(self.b.copy())
+            
         rng = np.random.default_rng(self.random)
         
         for t in range (self.max_iteration):
@@ -105,6 +110,9 @@ class LogisticRegression:
                 raise ValueError("Loss atau koefisien tidak finite. Coba kurangi learning rate.")
             
             self.loss_history.append(loss)
+            if history_loss is not None:
+                history_loss.append(self.b.copy())
+            
             self.n_iteration += 1
         return self
     
