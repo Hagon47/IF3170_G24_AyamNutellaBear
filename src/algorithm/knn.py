@@ -12,14 +12,10 @@ class KNN:
     def fit(self, X, y):
         X = np.array(X, dtype=float)
         y = np.array(y)
-
-        if X.ndim != 2 or X.size == 0:
-            raise ValueError("X harus matriks 2D yang tidak kosong.")
-        if y.ndim != 1 or len(y) != len(X):
-            raise ValueError("y harus vektor 1D dengan panjang yang sama dengan jumlah baris X.")
-        if self.k > len(X):
-            raise ValueError("k tidak boleh lebih besar dari jumlah baris X.")
-
         self.X_train = X
         self.y_train = y
         return self
+
+    def _euclidean_distances(self, x):
+        differences = self.X_train - x
+        return np.sqrt(np.sum(differences ** 2, axis=1))
