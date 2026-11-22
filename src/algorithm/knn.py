@@ -19,3 +19,18 @@ class KNN:
     def _euclidean_distances(self, x):
         differences = self.X_train - x
         return np.sqrt(np.sum(differences ** 2, axis=1))
+
+    def predict(self, X):
+        if self.X_train is None or self.y_train is None:
+            raise RuntimeError("Model belum di-fit.")
+
+        predict = []
+
+        for x in X:
+            distance = self._euclidean_distances(x)
+            top_neighbor = np.argsort(distance, kind="stable")[:self.k]
+            label = self.y_train[top_neighbor]
+            labels, count = np.unique(label, return_counts=True)
+            predict.append(labels[np.argmax(count)])
+        return np.array(predict)
+
