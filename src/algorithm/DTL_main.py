@@ -39,9 +39,10 @@ class Node:
 # L3. Hitung Gain berdasarkan kategori atribut
 # L4. Hitung Split Info dan Gain Ratio
 class DTL_Main:
-    def __init__(self, max_depth=None, min_samples_split=2, min_gain=1e-6, categorical_features=None):
+    def __init__(self, max_depth=None, min_samples_split=2, min_samples_leaf=1, min_gain=1e-6, categorical_features=None):
         self.max_depth = max_depth
         self.min_samples_split = min_samples_split
+        self.min_samples_leaf = min_samples_leaf
         self.min_gain = min_gain
         self.categorical_features = categorical_features
         self.root = None
@@ -133,6 +134,10 @@ class DTL_Main:
         right_w = right_class_w.sum(axis=1, keepdims=True)
         total_w = float(np.sum(w_known))
 
+        valid_mask = (left_w.ravel() >= self.min_samples_leaf) & (right_w.ravel() >= self.min_samples_leaf)
+        if not np.any(valid_mask):
+            return -1.0, None, None
+
         # Hitung Entropi cabang kiri, cabang kanan, dan Gain untuk seluruh kandidat titik potong
         with np.errstate(divide='ignore', invalid='ignore'):
             p_left = np.where(left_w > 0, left_class_w / left_w, 0.0)
@@ -144,7 +149,7 @@ class DTL_Main:
         p_left_branch = left_w.ravel() / total_w
         p_right_branch = right_w.ravel() / total_w
         e_children = p_left_branch * e_left + p_right_branch * e_right
-        gains = e_known - e_children
+        gains = np.where(valid_mask, e_known - e_children, -np.inf)
 
         # Pilih titik potong (nilai tengah) yang menghasilkan Gain terbesar
         best_idx = int(np.argmax(gains))
@@ -164,17 +169,22 @@ class DTL_Main:
         total_w = float(np.sum(w_known))
         e_children = 0.0
         branch_w = []
+        valid_branches = 0
 
         # Hitung Entropi tertimbang untuk setiap kategori unik
         for k in range(len(unique_vals)):
             mask_k = inv_idx == k
             wk = w_known[mask_k]
             sum_wk = float(np.sum(wk))
+            if sum_wk >= self.min_samples_leaf:
+                valid_branches += 1
             branch_w.append(sum_wk)
             if sum_wk > 0:
                 p_branch = sum_wk / total_w
                 e_children += p_branch * self.entropy(y_known[mask_k], wk)
-
+        
+        if valid_branches < 2: 
+            return -1.0, None, None
         raw_gain = e_known - e_children
         return float(raw_gain), branch_w, unique_vals
 
@@ -196,6 +206,7 @@ class DTL_Main:
     # Mengevaluasi seluruh atribut yang tersedia untuk memilih 1 pemisah terbaik berdasarkan Gain Ratio
     def find_best_split(self, X, y, weights, available_features):
         total_w = float(np.sum(weights))
+        min_req = max(self.min_samples_split, 2 * self.min_samples_leaf)
         candidates = []
 
         for j in available_features:
@@ -206,7 +217,7 @@ class DTL_Main:
 
             w_known = weights[known_mask]
             sum_w_known = float(np.sum(w_known))
-            if sum_w_known < self.min_samples_split:
+            if sum_w_known < min_req:
                 continue
 
             p_known = sum_w_known / total_w
@@ -266,6 +277,7 @@ class DTL_Main:
         if (
             e_current <= 1e-12
             or total_w < self.min_samples_split
+            or total_w < 2 * self.min_samples_leaf  
             or len(available_features) == 0
             or (self.max_depth is not None and depth >= self.max_depth)
         ):
