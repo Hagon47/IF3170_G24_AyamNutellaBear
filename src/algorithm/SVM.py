@@ -46,7 +46,7 @@ class Svm:
         self.n_iterations_ = 0
 
     # Fit function to train the SVM model
-    def fit(self, X, y):
+    def fit(self, X, y, sample_weight=None):
         if self.kernel not in self.KERNELS:
             raise ValueError("Unsupported kernel type")
         if self.multi_class not in self.MULTI_CLASS:
@@ -78,6 +78,19 @@ class Svm:
             raise ValueError("Training data cannot be empty")
         if y.dtype.kind not in ('b', 'i', 'u', 'f', 'U', 'S', 'O'):
             raise ValueError("Invalid training labels")
+        if sample_weight is None:
+            sample_weight = np.ones(X.shape[0], dtype=float)
+        else:
+            sample_weight = np.asarray(sample_weight, dtype=float)
+            if sample_weight.ndim != 1 or sample_weight.shape[0] != X.shape[0]:
+                raise ValueError("sample_weight must be a 1-D array matching X")
+            if not np.all(np.isfinite(sample_weight)):
+                raise ValueError("sample_weight contains invalid values")
+            if np.any(sample_weight < 0):
+                raise ValueError("sample_weight cannot contain negative values")
+            if not np.any(sample_weight > 0):
+                raise ValueError("sample_weight must contain at least one positive value")
+            sample_weight = sample_weight / np.mean(sample_weight)
 
         self.classes_ = np.unique(y)
         k = len(self.classes_)
@@ -108,6 +121,7 @@ class Svm:
             rng.shuffle(selected)
             X = X[selected]
             y = y[selected]
+            sample_weight = sample_weight[selected]
             self.classes_ = np.unique(y)
             k = len(self.classes_)
             if k < 2:
@@ -115,7 +129,7 @@ class Svm:
 
         if k == 2:
             y_bin = self._get_cls_map(y, self.classes_[1])
-            self.models_ = [self._train_binary(X, y_bin)]
+            self.models_ = [self._train_binary(X, y_bin, sample_weight)]
 
             m = self.models_[0]
             self.alpha = m['alpha']
@@ -128,7 +142,7 @@ class Svm:
 
         elif self.multi_class == 'ovr':
             self.models_ = [
-                self._train_binary(X, self._get_cls_map(y, c))
+                self._train_binary(X, self._get_cls_map(y, c), sample_weight)
                 for c in self.classes_
             ]
 
@@ -138,7 +152,9 @@ class Svm:
                 for j in range(i + 1, k):
                     mask = (y == self.classes_[i]) | (y == self.classes_[j])
                     y_bin = self._get_cls_map(y[mask], self.classes_[i])
-                    self.models_[(i, j)] = self._train_binary(X[mask], y_bin)
+                    self.models_[(i, j)] = self._train_binary(
+                        X[mask], y_bin, sample_weight[mask]
+                    )
 
         if k > 2:
             models = list(self.models_.values()) if isinstance(self.models_, dict) else self.models_
@@ -147,8 +163,17 @@ class Svm:
 
         return self
 
-    def _train_binary(self, X, y):
+    def _train_binary(self, X, y, sample_weight=None):
         n_samples = X.shape[0]
+        if sample_weight is None:
+            sample_weight = np.ones(n_samples, dtype=float)
+        else:
+            sample_weight = np.asarray(sample_weight, dtype=float)
+            if sample_weight.shape != (n_samples,):
+                raise ValueError("sample_weight must match the number of training samples")
+            if np.any(sample_weight < 0) or not np.all(np.isfinite(sample_weight)):
+                raise ValueError("sample_weight must contain finite non-negative values")
+            sample_weight = sample_weight / np.mean(sample_weight)
         K = self._compute_kernel(X, X)
 
         # Q_ij = y_i * y_j * K(x_i, x_j)
@@ -168,7 +193,11 @@ class Svm:
         }]
 
         upper_bound = None if np.isinf(self._C) else float(self._C)
-        bounds = [(0.0, upper_bound) for _ in range(n_samples)]
+        bounds = (
+            [(0.0, upper_bound) for _ in range(n_samples)]
+            if upper_bound is None
+            else [(0.0, upper_bound * float(w)) for w in sample_weight]
+        )
         initial_alpha = np.zeros(n_samples, dtype=float)
 
         result = minimize(
@@ -190,14 +219,21 @@ class Svm:
         eps = max(1e-8, float(self.tolerance))
         alpha[np.abs(alpha) < eps] = 0.0
         if upper_bound is not None:
-            alpha[np.abs(alpha - upper_bound) < eps] = upper_bound
-            alpha = np.clip(alpha, 0.0, upper_bound)
+            upper_bounds = np.asarray([bound[1] for bound in bounds], dtype=float)
+            alpha = np.clip(alpha, 0.0, upper_bounds)
+            close_to_upper = np.abs(alpha - upper_bounds) < eps
+            alpha[close_to_upper] = upper_bounds[close_to_upper]
         else:
             alpha = np.maximum(alpha, 0.0)
 
         support = alpha > eps
+        upper_bounds = (
+            np.asarray([bound[1] for bound in bounds], dtype=float)
+            if upper_bound is not None
+            else np.zeros(n_samples, dtype=float)
+        )
         at_upper = (
-            alpha >= upper_bound - eps
+            alpha >= upper_bounds - eps
             if upper_bound is not None
             else np.zeros(n_samples, dtype=bool)
         )
