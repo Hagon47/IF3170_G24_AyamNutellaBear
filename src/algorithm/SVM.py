@@ -347,6 +347,7 @@ class Svm:
         seed=42,
         n_iters=250,
         tolerance=1e-5,
+        models=None,
     ):
         X = np.asarray(X, dtype=float)
         y = np.asarray(y)
@@ -371,25 +372,88 @@ class Svm:
         elif X_vis.shape[1] < 2:
             raise ValueError("Decision-boundary visualization requires at least two features")
 
-        plot_specs = [
-            ('Linear', 'linear_decision_boundary.png', 'linear', {}),
-            ('Polynomial', 'polynomial_decision_boundary.png', 'polynomial',
-             {'degree': 2, 'coef0': 0.7}),
-            ('Gaussian RBF', 'gaussian_rbf_decision_boundary.png', 'rbf',
-             {'gamma': 0.05}),
-        ]
+        if models is None:
+            plot_specs = [
+                ('Linear', 'linear_decision_boundary.png', 'linear', {}),
+                ('Polynomial', 'polynomial_decision_boundary.png', 'polynomial',
+                 {'degree': 2, 'coef0': 0.7}),
+                ('Gaussian RBF', 'gaussian_rbf_decision_boundary.png', 'rbf',
+                 {'gamma': 0.05}),
+            ]
+        else:
+            if hasattr(models, 'items'):
+                model_items = list(models.items())
+            elif isinstance(models, (list, tuple)):
+                model_items = [(f'Model {i + 1}', model) for i, model in enumerate(models)]
+            else:
+                model_items = [('User Model', models)]
+
+            plot_specs = []
+            for title, user_model in model_items:
+                if hasattr(user_model, 'estimators_'):
+                    from .AdaBoostSVM import AdaBoostSvm
+                    plot_specs.append((
+                        str(title),
+                        f"{str(title).lower().replace(' ', '_')}_adaboost_decision_boundary.png",
+                        AdaBoostSvm,
+                        user_model,
+                    ))
+                else:
+                    plot_specs.append((
+                        str(title),
+                        f"{str(title).lower().replace(' ', '_')}_svm_decision_boundary.png",
+                        Svm,
+                        user_model,
+                    ))
 
         save_dir = Path(save_dir)
         save_dir.mkdir(parents=True, exist_ok=True)
 
-        for title, filename, kernel, options in plot_specs:
-            vis_model = Svm(
-                kernel=kernel,
-                C=1.0,
-                n_iters=n_iters,
-                tolerance=tolerance,
-                **options,
-            ).fit(X_vis, y_vis)
+        for title, filename, model_type, user_model in plot_specs:
+            if models is None:
+                kernel = model_type
+                options = user_model
+                if title == 'Polynomial':
+                    kernel = 'polynomial'
+                    options = {'degree': 2, 'coef0': 0.7}
+                elif title == 'Gaussian RBF':
+                    kernel = 'rbf'
+                    options = {'gamma': 0.05}
+                vis_model = Svm(
+                    kernel=kernel,
+                    C=1.0,
+                    n_iters=n_iters,
+                    tolerance=tolerance,
+                    **options,
+                ).fit(X_vis, y_vis)
+            elif model_type is Svm:
+                vis_model = Svm(
+                    kernel=user_model.kernel,
+                    C=user_model.C,
+                    gamma=user_model.gamma,
+                    degree=user_model.degree,
+                    coef0=user_model.coef0,
+                    n_iters=user_model.n_iters,
+                    tolerance=user_model.tolerance,
+                    multi_class=user_model.multi_class,
+                    max_samples=user_model.max_samples,
+                    random_state=user_model.random_state,
+                ).fit(X_vis, y_vis)
+            else:
+                vis_model = model_type(
+                    n_estimators=getattr(user_model, 'n_estimators_', user_model.n_estimators),
+                    learning_rate=user_model.learning_rate,
+                    kernel=user_model.kernel,
+                    C=user_model.C,
+                    gamma=user_model.gamma,
+                    degree=user_model.degree,
+                    coef0=user_model.coef0,
+                    n_iters=user_model.n_iters,
+                    tolerance=user_model.tolerance,
+                    multi_class=user_model.multi_class,
+                    max_samples=user_model.max_samples,
+                    random_state=user_model.random_state,
+                ).fit(X_vis, y_vis)
 
             x_min, x_max = X_vis[:, 0].min() - 0.5, X_vis[:, 0].max() + 0.5
             y_min, y_max = X_vis[:, 1].min() - 0.5, X_vis[:, 1].max() + 0.5
@@ -398,37 +462,72 @@ class Svm:
                 np.linspace(y_min, y_max, 300),
             )
             grid = np.column_stack([xx.ravel(), yy.ravel()])
-            zz = vis_model.decision_function(grid).reshape(xx.shape)
+            if hasattr(vis_model, 'decision_function'):
+                zz_scores = vis_model.decision_function(grid)
+                if isinstance(zz_scores, dict):
+                    zz = vis_model.predict(grid).reshape(xx.shape)
+                elif np.asarray(zz_scores).ndim == 2:
+                    zz = np.asarray(zz_scores).argmax(axis=1).reshape(xx.shape)
+                else:
+                    zz = np.asarray(zz_scores).reshape(xx.shape)
+            else:
+                zz = vis_model.predict(grid).reshape(xx.shape)
 
             plt.figure(figsize=(8, 6))
-            plt.contourf(
-                xx, yy, zz,
-                levels=[-np.inf, 0, np.inf],
-                alpha=0.20,
-                colors=['#8db4e2', '#f2b6b6'],
-            )
-            plt.contour(
-                xx, yy, zz,
-                levels=[-1, 0, 1],
-                colors=['#1f4e79', 'black', '#9c0006'],
-                linestyles=['--', '-', '--'],
-                linewidths=[1.5, 2, 1.5],
-            )
+            if len(np.unique(y_vis)) == 2:
+                plt.contourf(
+                    xx, yy, zz,
+                    levels=[-np.inf, 0, np.inf],
+                    alpha=0.20,
+                    colors=['#8db4e2', '#f2b6b6'],
+                )
+                plt.contour(
+                    xx, yy, zz,
+                    levels=[-1, 0, 1],
+                    colors=['#1f4e79', 'black', '#9c0006'],
+                    linestyles=['--', '-', '--'],
+                    linewidths=[1.5, 2, 1.5],
+                )
+            else:
+                plt.contourf(xx, yy, zz, alpha=0.20, cmap='coolwarm')
+
             plt.scatter(
                 X_vis[:, 0], X_vis[:, 1],
                 c=y_vis, cmap='coolwarm',
                 edgecolors='k', s=25, alpha=0.75,
                 label='Data latih',
             )
-            plt.scatter(
-                vis_model.support_vectors[:, 0],
-                vis_model.support_vectors[:, 1],
-                s=95, facecolors='none', edgecolors='gold',
-                linewidths=1.5,
-                label=f'Support vector ({len(vis_model.support_vectors)})',
-            )
+            support_vectors = []
+            if hasattr(vis_model, 'estimators_'):
+                for estimator in vis_model.estimators_:
+                    if estimator.support_vectors is not None:
+                        support_vectors.append(estimator.support_vectors)
+                    elif isinstance(estimator.models_, dict):
+                        support_vectors.extend(
+                            model['support_vectors'] for model in estimator.models_.values()
+                        )
+                    elif isinstance(estimator.models_, list):
+                        support_vectors.extend(
+                            model['support_vectors'] for model in estimator.models_
+                        )
+            elif vis_model.support_vectors is not None:
+                support_vectors.append(vis_model.support_vectors)
+
+            if support_vectors:
+                support_vectors = np.vstack([
+                    vectors for vectors in support_vectors if len(vectors) > 0
+                ]) if any(len(vectors) > 0 for vectors in support_vectors) else np.empty((0, 2))
+                if len(support_vectors):
+                    plt.scatter(
+                        support_vectors[:, 0],
+                        support_vectors[:, 1],
+                        s=95, facecolors='none', edgecolors='gold',
+                        linewidths=1.5,
+                        label=f'Support vector ({len(support_vectors)})',
+                    )
             plt.title(
-                f'SVM {title}: bidang pemisah, margin, dan support vector'
+                f"{'AdaBoost-SVM' if hasattr(vis_model, 'estimators_') else 'SVM'} "
+                f"{title}: bidang pemisah, margin, dan support vector"
             )
             plt.xlabel('PCA component 1')
             plt.ylabel('PCA component 2')
