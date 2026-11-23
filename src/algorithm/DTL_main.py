@@ -19,6 +19,7 @@ class Node:
         entropy=0.0,
         gain_ratio=0.0,
         n_samples=0.0,
+        n_errors=0.0,
     ):
         self.feature_idx = feature_idx
         self.feature_name = feature_name
@@ -32,19 +33,37 @@ class Node:
         self.entropy = entropy
         self.gain_ratio = gain_ratio
         self.n_samples = n_samples
+        self.n_errors = n_errors
 
 # Implementasi Decision Tree Learning (C4.5) yang mendukung numerik, kategorikal, dan missing value
 # L1. Hitung Entropi awal node saat ini
 # L2. Tentukan kategori atribut saat ini: kontinu, kategorikal, mengandung missing value
 # L3. Hitung Gain berdasarkan kategori atribut
 # L4. Hitung Split Info dan Gain Ratio
+# L5. Opsional: lakukan Post-Pruning (PEP / REP) setelah pohon selesai dibangun
+
 class DTL_Main:
-    def __init__(self, max_depth=None, min_samples_split=2, min_samples_leaf=1, min_gain=1e-6, categorical_features=None):
+    def __init__(
+        self,
+        max_depth=None,
+        min_samples_split=2,
+        min_samples_leaf=1,
+        min_gain=1e-6,
+        categorical_features=None,
+        pruning=None,
+        val_ratio=0.15,
+        rep_metric='macro_f1',
+        random_state=42,
+    ):
         self.max_depth = max_depth
         self.min_samples_split = min_samples_split
         self.min_samples_leaf = min_samples_leaf
         self.min_gain = min_gain
         self.categorical_features = categorical_features
+        self.pruning = pruning
+        self.val_ratio = float(val_ratio)
+        self.rep_metric = rep_metric
+        self.random_state = random_state
         self.root = None
         self.classes = None
         self.feature_names = None
@@ -182,8 +201,8 @@ class DTL_Main:
             if sum_wk > 0:
                 p_branch = sum_wk / total_w
                 e_children += p_branch * self.entropy(y_known[mask_k], wk)
-        
-        if valid_branches < 2: 
+
+        if valid_branches < 2:
             return -1.0, None, None
         raw_gain = e_known - e_children
         return float(raw_gain), branch_w, unique_vals
@@ -270,14 +289,19 @@ class DTL_Main:
         # Hitung Entropi awal dan distribusi kelas pada node saat ini
         total_w = float(np.sum(weights))
         probs = self.class_probs(y, weights)
-        majority_class = self.classes[int(np.argmax(probs))]
+        majority_idx = int(np.argmax(probs))
+        majority_class = self.classes[majority_idx]
         e_current = self.entropy(y, weights)
+
+        # Hitung bobot kesalahan jika node ini dijadikan leaf (digunakan oleh PEP)
+        class_counts = np.bincount(y, weights=weights, minlength=len(self.classes))
+        n_errors = float(max(0.0, total_w - class_counts[majority_idx]))
 
         # Cek kondisi berhenti (daun sudah murni, data terlalu sedikit, fitur habis, atau mencapai max_depth)
         if (
             e_current <= 1e-12
             or total_w < self.min_samples_split
-            or total_w < 2 * self.min_samples_leaf  
+            or total_w < 2 * self.min_samples_leaf
             or len(available_features) == 0
             or (self.max_depth is not None and depth >= self.max_depth)
         ):
@@ -287,6 +311,7 @@ class DTL_Main:
                 class_probs=probs,
                 entropy=e_current,
                 n_samples=total_w,
+                n_errors=n_errors,
             )
 
         # Cari atribut pemisah terbaik untuk node saat ini
@@ -298,6 +323,7 @@ class DTL_Main:
                 class_probs=probs,
                 entropy=e_current,
                 n_samples=total_w,
+                n_errors=n_errors,
             )
 
         j = best_split['feature_idx']
@@ -314,6 +340,7 @@ class DTL_Main:
             entropy=e_current,
             gain_ratio=best_split['gain_ratio'],
             n_samples=total_w,
+            n_errors=n_errors,
         )
 
         # Kelompokkan indeks baris yang nilainya diketahui ke masing-masing cabang
@@ -353,6 +380,7 @@ class DTL_Main:
                     class_probs=probs,
                     entropy=0.0,
                     n_samples=0.0,
+                    n_errors=0.0,
                 )
                 continue
 
@@ -369,6 +397,201 @@ class DTL_Main:
 
         return node
 
+    # L5 Mengubah internal node menjadi leaf saat subtree dipangkas
+    def collapse_to_leaf(self, node):
+        node.is_leaf = True
+        node.children = {}
+        node.branch_weights = {}
+        node.feature_idx = None
+        node.feature_name = None
+        node.threshold = None
+        node.gain_ratio = 0.0
+
+    # L5 Menghitung total error dan jumlah daun pada subtree untuk Pessimistic Error Pruning (PEP)
+    def subtree_pep_stats(self, node):
+        if node.is_leaf:
+            return node.n_errors, (1 if node.n_samples > 0 else 0)
+        total_err = 0.0
+        total_leaves = 0
+        for child in node.children.values():
+            c_err, c_leaves = self.subtree_pep_stats(child)
+            total_err += c_err
+            total_leaves += c_leaves
+        return total_err, max(1, total_leaves)
+
+    # L5 Pessimistic Error Pruning (PEP) secara top-down tanpa memotong data latih
+    def prune_pep(self, node):
+        if node.is_leaf:
+            return
+        n_total = node.n_samples
+        if n_total <= 0:
+            self.collapse_to_leaf(node)
+            return
+
+        e_sub, n_leaves = self.subtree_pep_stats(node)
+        e_prime_leaf = node.n_errors + 0.5
+        e_prime_sub = e_sub + 0.5 * n_leaves
+        p_sub = min(max(e_prime_sub / n_total, 0.0), 1.0)
+        se_sub = float(np.sqrt(n_total * p_sub * (1.0 - p_sub)))
+
+        if e_prime_leaf <= e_prime_sub + se_sub:
+            self.collapse_to_leaf(node)
+            return
+
+        for child in node.children.values():
+            self.prune_pep(child)
+
+    # L5 Membagi data secara stratified di dalam fit() untuk validation set internal REP
+    def stratified_internal_split(self, y_encoded):
+        rng = np.random.default_rng(self.random_state)
+        train_idx = []
+        val_idx = []
+        for cls_idx in range(len(self.classes)):
+            cls_pos = np.flatnonzero(y_encoded == cls_idx)
+            rng.shuffle(cls_pos)
+            n_val = int(round(len(cls_pos) * self.val_ratio))
+            if len(cls_pos) >= 2:
+                n_val = max(1, min(n_val, len(cls_pos) - 1))
+            else:
+                n_val = 0
+            val_idx.append(cls_pos[:n_val])
+            train_idx.append(cls_pos[n_val:])
+        train_idx = np.concatenate(train_idx)
+        val_idx = np.concatenate(val_idx)
+        rng.shuffle(train_idx)
+        rng.shuffle(val_idx)
+        return train_idx, val_idx
+
+    # L5 Menghitung skor evaluasi REP ('macro_f1' atau 'accuracy') langsung dari confusion matrix
+    def score_from_cm(self, cm):
+        total = cm.sum()
+        if total == 0:
+            return 0.0
+        if self.rep_metric == 'accuracy':
+            return float(np.trace(cm) / total)
+        if self.rep_metric == 'macro_f1':
+            tp = np.diag(cm).astype(float)
+            fp = cm.sum(axis=0) - tp
+            fn = cm.sum(axis=1) - tp
+            denom = 2.0 * tp + fp + fn
+            f1s = np.where(denom > 0, (2.0 * tp) / denom, 0.0)
+            return float(np.mean(f1s))
+        raise ValueError("rep_metric harus bernilai 'macro_f1' atau 'accuracy'.")
+
+    # L5 Reduced Error Pruning (REP) secara bottom-up dengan pembaruan confusion matrix inkremental
+    def prune_rep(self, X_val, y_val_encoded):
+        n_val = len(y_val_encoded)
+        if n_val == 0 or self.root is None or self.root.is_leaf:
+            return
+
+        n_classes = len(self.classes)
+        current_probs = self.predict_proba(X_val)
+        current_preds = np.argmax(current_probs, axis=1)
+
+        cm = np.zeros((n_classes, n_classes), dtype=int)
+        np.add.at(cm, (y_val_encoded, current_preds), 1)
+        state = {'score': self.score_from_cm(cm)}
+
+        def recurse(node, idx, route_w):
+            if len(idx) == 0:
+                if not node.is_leaf:
+                    # Pangkas cabang yang tidak pernah dilewati data validasi REP
+                    self.collapse_to_leaf(node)
+                return np.empty((0, n_classes), dtype=float)
+
+            if node.is_leaf:
+                return np.broadcast_to(node.class_probs, (len(idx), n_classes)).copy()
+
+            col = X_val[idx, node.feature_idx]
+            miss_mask = self.is_missing(col)
+            known_mask = ~miss_mask
+
+            sub_probs = np.zeros((len(idx), n_classes), dtype=float)
+            has_branch = np.zeros(len(idx), dtype=bool)
+
+            if node.is_continuous:
+                known_pos = np.flatnonzero(known_mask)
+                if len(known_pos) > 0:
+                    vals_known = col[known_pos].astype(float)
+                    branch_positions = {
+                        '<=': known_pos[vals_known <= node.threshold],
+                        '>': known_pos[vals_known > node.threshold],
+                    }
+                else:
+                    branch_positions = {'<=': np.array([], dtype=int), '>': np.array([], dtype=int)}
+            else:
+                branch_positions = {}
+                known_pos = np.flatnonzero(known_mask)
+                if len(known_pos) > 0:
+                    vals_known = col[known_pos]
+                    for b_key in node.children:
+                        branch_positions[b_key] = known_pos[vals_known == b_key]
+
+            miss_pos = np.flatnonzero(miss_mask)
+
+            for b_key, child in node.children.items():
+                k_pos = branch_positions.get(b_key, np.array([], dtype=int))
+                p_branch = node.branch_weights.get(b_key, 0.0)
+
+                if len(miss_pos) > 0 and p_branch > 0:
+                    c_pos = np.concatenate([k_pos, miss_pos])
+                    c_idx = idx[c_pos]
+                    c_rw = np.concatenate([route_w[k_pos], route_w[miss_pos] * p_branch])
+                    c_probs = recurse(child, c_idx, c_rw)
+                    if len(k_pos) > 0:
+                        sub_probs[k_pos] = c_probs[:len(k_pos)]
+                        has_branch[k_pos] = True
+                    sub_probs[miss_pos] += p_branch * c_probs[len(k_pos):]
+                    has_branch[miss_pos] = True
+                else:
+                    c_idx = idx[k_pos]
+                    c_rw = route_w[k_pos]
+                    c_probs = recurse(child, c_idx, c_rw)
+                    if len(k_pos) > 0:
+                        sub_probs[k_pos] = c_probs
+                        has_branch[k_pos] = True
+
+            # Fallback ke probabilitas node induk untuk kategori asing atau missing tanpa cabang berbobot positif
+            fallback_mask = (~has_branch) | (miss_mask & (sub_probs.sum(axis=1) <= 0))
+            if np.any(fallback_mask):
+                sub_probs[fallback_mask] = node.class_probs
+
+            # Evaluasi dampak jika node ini dipangkas menjadi leaf
+            delta = route_w[:, None] * (node.class_probs[None, :] - sub_probs)
+            cand_probs = current_probs[idx] + delta
+            cand_preds = np.argmax(cand_probs, axis=1)
+
+            old_preds = current_preds[idx]
+            changed = cand_preds != old_preds
+
+            if np.any(changed):
+                ch_y = y_val_encoded[idx[changed]]
+                ch_old = old_preds[changed]
+                ch_new = cand_preds[changed]
+                cm_cand = cm.copy()
+                np.add.at(cm_cand, (ch_y, ch_old), -1)
+                np.add.at(cm_cand, (ch_y, ch_new), 1)
+                cand_score = self.score_from_cm(cm_cand)
+            else:
+                cm_cand = cm
+                cand_score = state['score']
+
+            # Pangkas jika skor validasi meningkat atau tetap sama (memilih pohon lebih sederhana)
+            if cand_score >= state['score'] - 1e-12:
+                self.collapse_to_leaf(node)
+                current_probs[idx] = cand_probs
+                if np.any(changed):
+                    current_preds[idx] = cand_preds
+                    cm[:, :] = cm_cand
+                    state['score'] = cand_score
+                return np.broadcast_to(node.class_probs, (len(idx), n_classes)).copy()
+
+            return sub_probs
+
+        all_idx = np.arange(n_val, dtype=int)
+        all_rw = np.ones(n_val, dtype=float)
+        recurse(self.root, all_idx, all_rw)
+
     # Entry point pelatihan model: siapkan array NumPy, tipe fitur, dan bobot awal lalu bangun pohon
     def fit(self, X, y, feature_names=None):
         if hasattr(X, 'columns') and hasattr(X, 'to_numpy'):
@@ -381,11 +604,23 @@ class DTL_Main:
         y_arr = np.asarray(y)
         self.classes, y_encoded = np.unique(y_arr, return_inverse=True)
         self.is_continuous = self.detect_feature_types(X_arr)
-
-        weights = np.ones(len(y_encoded), dtype=float)
         available_features = list(range(X_arr.shape[1]))
 
-        self.root = self.build_tree(X_arr, y_encoded, weights, available_features, depth=0)
+        if self.pruning == 'rep':
+            fit_idx, val_idx = self.stratified_internal_split(y_encoded)
+            X_fit, y_fit = X_arr[fit_idx], y_encoded[fit_idx]
+            X_rep, y_rep = X_arr[val_idx], y_encoded[val_idx]
+            weights = np.ones(len(y_fit), dtype=float)
+            self.root = self.build_tree(X_fit, y_fit, weights, available_features, depth=0)
+            self.prune_rep(X_rep, y_rep)
+        elif self.pruning in (None, 'pep'):
+            weights = np.ones(len(y_encoded), dtype=float)
+            self.root = self.build_tree(X_arr, y_encoded, weights, available_features, depth=0)
+            if self.pruning == 'pep':
+                self.prune_pep(self.root)
+        else:
+            raise ValueError("pruning harus bernilai None, 'pep', atau 'rep'.")
+
         return self
 
     # Menelusuri pohon untuk satu baris data uji (menangani missing value dan kategori asing)
