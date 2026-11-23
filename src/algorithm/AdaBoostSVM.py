@@ -189,6 +189,28 @@ class AdaBoostSvm:
     def score(self, X, y):
         return float(np.mean(self.predict(X) == np.asarray(y)))
 
+    def plot_decision_boundaries(
+        self,
+        X,
+        y,
+        save_dir,
+        max_samples=700,
+        seed=42,
+        n_iters=None,
+        tolerance=None,
+        show=True,
+    ):
+        return Svm.plot_decision_boundaries(
+            X,
+            y,
+            save_dir,
+            max_samples=max_samples,
+            seed=seed,
+            n_iters=self.n_iters if n_iters is None else n_iters,
+            tolerance=self.tolerance if tolerance is None else tolerance,
+            models={'AdaBoostSvm': self},
+        )
+
     def _check_fitted(self, X):
         if not self.estimators_:
             raise ValueError("Model has not been trained")
