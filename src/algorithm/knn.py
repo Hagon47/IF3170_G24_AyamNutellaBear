@@ -44,3 +44,14 @@ class KNN:
             predict.append(labels[np.argmax(count)])
         return np.array(predict)
 
+    def save(self, path):
+        if self.X_train is None or self.y_train is None:
+            raise RuntimeError("Model belum di-fit.")
+        np.savez(path, k=self.k, p=self.p, X_train=self.X_train, y_train=self.y_train)
+
+    @classmethod
+    def load(cls, path):
+        with np.load(path, allow_pickle=False) as data:
+            model = cls(k=int(data['k']), p=data['p'].item())
+            model.fit(data['X_train'], data['y_train'])
+        return model
